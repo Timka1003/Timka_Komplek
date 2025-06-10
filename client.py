@@ -1,146 +1,243 @@
+from kivymd.app import MDApp
+from kivymd.uix.screen import MDScreen
+from kivymd.uix.card import MDCard
+from kivymd.uix.button import MDRaisedButton, MDFlatButton
+from kivymd.uix.textfield import MDTextField
+from kivymd.uix.label import MDLabel
+from kivymd.uix.progressbar import MDProgressBar
+from kivymd.uix.dialog import MDDialog
+from kivymd.uix.list import TwoLineListItem
+from kivymd.uix.toolbar import MDTopAppBar
+from kivymd.uix.selectioncontrol import MDSwitch
+from kivymd.uix.snackbar import Snackbar
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.scrollview import ScrollView
+from kivy.clock import Clock
 import socket
-import argparse
-import tkinter as tk
-from tkinter import ttk, messagebox
+from threading import Thread
 
-class PrimeNumberApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Поиск простых чисел")
-        
-        self.main_frame = ttk.Frame(root, padding="10")
-        self.main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        
-        ttk.Label(self.main_frame, text="Начало диапазона:").grid(row=0, column=0, sticky=tk.W, pady=5)
-        self.start_entry = ttk.Entry(self.main_frame)
-        self.start_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), pady=5)
-        self.start_entry.insert(0, "0")
-        
-        ttk.Label(self.main_frame, text="Конец диапазона:").grid(row=1, column=0, sticky=tk.W, pady=5)
-        self.end_entry = ttk.Entry(self.main_frame)
-        self.end_entry.grid(row=1, column=1, sticky=(tk.W, tk.E), pady=5)
-        self.end_entry.insert(0, "100")
-        
-        ttk.Label(self.main_frame, text="Количество воркеров:").grid(row=2, column=0, sticky=tk.W, pady=5)
-        self.workers_entry = ttk.Entry(self.main_frame)
-        self.workers_entry.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=5)
-        self.workers_entry.insert(0, "3")
-        
-        ttk.Label(self.main_frame, text="Адреса воркеров (host:port):").grid(row=3, column=0, sticky=tk.W, pady=5)
-        self.workers_addresses_text = tk.Text(self.main_frame, height=4, width=30)
-        self.workers_addresses_text.grid(row=3, column=1, sticky=(tk.W, tk.E), pady=5)
-        self.workers_addresses_text.insert(tk.END, "localhost:5555\nlocalhost:5556\nlocalhost:5557")
+class PrimeNumberApp(MDApp):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.dialog = None
+        self.calculation_thread = None
+        self.is_calculating = False
 
-        self.run_button = ttk.Button(self.main_frame, text="Найти простые числа", command=self.run_calculation)
-        self.run_button.grid(row=4, column=0, columnspan=2, pady=10)
-        
-        self.result_frame = ttk.LabelFrame(self.main_frame, text="Результаты", padding="10")
-        self.result_frame.grid(row=5, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
-        
-        self.result_text = tk.Text(self.result_frame, height=10, width=50, state=tk.DISABLED)
-        self.result_text.pack()
-        
-        self.progress = ttk.Progressbar(self.main_frame, orient=tk.HORIZONTAL, mode='determinate')
-        self.progress.grid(row=6, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
-        
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
-        self.main_frame.columnconfigure(1, weight=1)
-    
-    def distribute_range(self, total_start, total_end, workers):
-        total_numbers = total_end - total_start + 1
-        chunk_size = total_numbers // workers
-        ranges = []
-        
-        for i in range(workers):
-            start = total_start + i * chunk_size
-            end = start + chunk_size - 1 if i < workers - 1 else total_end
-            ranges.append((start, end))
-        
-        return ranges
-    
-    def get_primes_count(self, worker_addresses, ranges):
-        results = []
-        self.progress['maximum'] = len(worker_addresses)
-        self.progress['value'] = 0
-        
-        for i, ((host, port), (start, end)) in enumerate(zip(worker_addresses, ranges)):
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(5)  # Таймаут 5 секунд
-                    s.connect((host, port))
-                    s.sendall(f"{start},{end}".encode())
-                    data = s.recv(1024).decode()
-                    results.append((f"{host}:{port}", start, end, int(data)))
-            except Exception as e:
-                results.append((f"{host}:{port}", start, end, f"Ошибка: {str(e)}"))
-            
-            self.progress['value'] = i + 1
-            self.root.update_idletasks()
-        
-        return results
-    
-    def run_calculation(self):
+    def build(self):
+        self.theme_cls.theme_style = "Light"
+        self.theme_cls.primary_palette = "Teal"
+
+        self.screen = MDScreen()
+
+        root_layout = BoxLayout(orientation="vertical")
+
+        self.top_bar = MDTopAppBar(
+            title="Поиск простых чисел",
+            left_action_items=[["menu", lambda x: self.show_settings()]],
+            right_action_items=[["information", lambda x: self.show_help()]],
+        )
+        root_layout.add_widget(self.top_bar)
+
+        content_layout = BoxLayout(orientation="horizontal", padding=10, spacing=10)
+
+        self.settings_card = self.build_settings_card()
+        self.results_card = self.build_results_card()
+
+        content_layout.add_widget(self.settings_card)
+        content_layout.add_widget(self.results_card)
+
+        root_layout.add_widget(content_layout)
+
+        self.screen.add_widget(root_layout)
+        return self.screen
+
+    def build_settings_card(self):
+        card = MDCard(
+            orientation="vertical",
+            padding=20,
+            size_hint=(0.4, 1),
+            elevation=3,
+            radius=15
+        )
+
+        self.start_input = MDTextField(
+            hint_text="Начало диапазона",
+            text="1",
+            input_filter="int",
+            size_hint_y=None,
+            height=60
+        )
+
+        self.end_input = MDTextField(
+            hint_text="Конец диапазона",
+            text="1000",
+            input_filter="int",
+            size_hint_y=None,
+            height=60
+        )
+
+        self.workers_input = MDTextField(
+            hint_text="Потоки",
+            text="4",
+            input_filter="int",
+            size_hint_y=None,
+            height=60
+        )
+
+        self.calc_btn = MDRaisedButton(
+            text="НАЧАТЬ РАСЧЕТ",
+            on_release=self.toggle_calculation,
+            size_hint=(1, None),
+            height=50
+        )
+
+        self.stop_btn = MDFlatButton(
+            text="ОСТАНОВИТЬ",
+            on_release=self.stop_calculation,
+            disabled=True,
+            size_hint=(1, None),
+            height=50
+        )
+
+        btn_box = BoxLayout(
+            spacing=10,
+            size_hint_y=None,
+            height=50
+        )
+        btn_box.add_widget(self.calc_btn)
+        btn_box.add_widget(self.stop_btn)
+
+        self.progress = MDProgressBar(
+            value=0,
+            size_hint_y=None,
+            height=6
+        )
+
+        card.add_widget(self.start_input)
+        card.add_widget(self.end_input)
+        card.add_widget(self.workers_input)
+        card.add_widget(btn_box)
+        card.add_widget(self.progress)
+
+        return card
+
+    def build_results_card(self):
+        card = MDCard(orientation="vertical", padding=10, size_hint=(0.6, 1), elevation=3, radius=15)
+
+        self.results_header = MDLabel(text="Результаты", halign="center", font_style="H6", size_hint_y=None, height=40)
+        self.scroll_results = ScrollView()
+        self.results_list = BoxLayout(orientation="vertical", size_hint_y=None, spacing=5)
+        self.results_list.bind(minimum_height=self.results_list.setter("height"))
+        self.scroll_results.add_widget(self.results_list)
+        self.summary_label = MDLabel(text="", halign="center", font_style="Subtitle1", size_hint_y=None, height=40)
+
+        card.add_widget(self.results_header)
+        card.add_widget(self.scroll_results)
+        card.add_widget(self.summary_label)
+        return card
+
+    def toggle_calculation(self, *args):
+        if self.is_calculating:
+            self.stop_calculation()
+        else:
+            self.start_calculation()
+
+    def start_calculation(self):
         try:
-            start = int(self.start_entry.get())
-            end = int(self.end_entry.get())
-            workers = int(self.workers_entry.get())
+            start = int(self.start_input.text)
+            end = int(self.end_input.text)
+            workers = int(self.workers_input.text)
 
-            if start < 0 or end < start:
-                messagebox.showerror("Ошибка", "Некорректный диапазон чисел")
-                return
-            
-            if workers <= 0:
-                messagebox.showerror("Ошибка", "Количество воркеров должно быть положительным")
+            if start < 1 or end < start or workers < 1:
+                self.show_error("Проверьте ввод")
                 return
 
-            worker_addresses = []
-            addresses_text = self.workers_addresses_text.get("1.0", tk.END).strip().split('\n')
-            for addr in addresses_text:
-                if addr.strip():
-                    try:
-                        host, port = addr.strip().split(':')
-                        worker_addresses.append((host, int(port)))
-                    except ValueError:
-                        messagebox.showerror("Ошибка", f"Некорректный адрес воркера: {addr}")
-                        return
-            
-            if len(worker_addresses) != workers:
-                messagebox.showwarning("Предупреждение", 
-                                      f"Количество воркеров ({workers}) не совпадает с количеством адресов ({len(worker_addresses)}). "
-                                      "Будут использованы только первые {workers} адресов.")
-                worker_addresses = worker_addresses[:workers]
-            
+            self.prepare_for_calculation()
 
-            ranges = self.distribute_range(start, end, workers)
-
-            self.result_text.config(state=tk.NORMAL)
-            self.result_text.delete(1.0, tk.END)
-            
-            results = self.get_primes_count(worker_addresses, ranges)
-            
-            total_primes = 0
-            self.result_text.insert(tk.END, "-" * 50 + "\n")
-            for worker, start, end, count in results:
-                if isinstance(count, int):
-                    self.result_text.insert(tk.END, f"Воркер {worker}: диапазон {start}-{end}, найдено простых чисел: {count}\n")
-                    total_primes += count
-                else:
-                    self.result_text.insert(tk.END, f"Воркер {worker}: диапазон {start}-{end}, {count}\n")
-            
-            self.result_text.insert(tk.END, "-" * 50 + "\n")
-            self.result_text.insert(tk.END, f"Всего найдено простых чисел: {total_primes}\n")
-            self.result_text.config(state=tk.DISABLED)
-            
+            self.calculation_thread = Thread(target=self.run_calculation, args=(start, end, workers), daemon=True)
+            self.calculation_thread.start()
         except ValueError:
-            messagebox.showerror("Ошибка", "Пожалуйста, введите корректные числовые значения")
-        except Exception as e:
-            messagebox.showerror("Ошибка", f"Произошла ошибка: {str(e)}")
+            self.show_error("Неверный формат чисел")
 
-def main():
-    root = tk.Tk()
-    app = PrimeNumberApp(root)
-    root.mainloop()
+    def stop_calculation(self, *args):
+        self.is_calculating = False
+        self.calc_btn.text = "НАЧАТЬ РАСЧЕТ"
+        self.stop_btn.disabled = True
+        self.results_header.text = "Расчет прерван"
+
+    def prepare_for_calculation(self):
+        self.is_calculating = True
+        self.results_list.clear_widgets()
+        self.calc_btn.text = "ПАУЗА"
+        self.stop_btn.disabled = False
+        self.progress.value = 0
+        self.results_header.text = "Выполняется..."
+        self.summary_label.text = ""
+
+    def run_calculation(self, start, end, workers):
+        total_primes = 0
+        ranges = self.distribute_range(start, end, workers)
+        for i, (r_start, r_end) in enumerate(ranges):
+            if not self.is_calculating:
+                return
+            count = self.real_server_request(r_start, r_end)
+            total_primes += count
+            Clock.schedule_once(lambda dt, s=r_start, e=r_end, c=count: self.update_results(s, e, c, total_primes, i+1, len(ranges)))
+        Clock.schedule_once(lambda dt: self.finish_calculation(total_primes))
+
+    def real_server_request(self, start, end):
+        try:
+            with socket.create_connection(("localhost", 5555), timeout=5) as sock:
+                sock.sendall(f"{start},{end}".encode())
+                return int(sock.recv(1024).decode())
+        except Exception as e:
+            Clock.schedule_once(lambda dt: self.show_error(f"Ошибка подключения: {e}"))
+            return 0
+
+    def update_results(self, start, end, count, total, current, total_workers):
+        self.progress.value = (current / total_workers) * 100
+        item = TwoLineListItem(text=f"Диапазон {start}-{end}", secondary_text=f"Простых чисел: {count}")
+        self.results_list.add_widget(item)
+        self.summary_label.text = f"Всего: {total}"
+        self.scroll_results.scroll_to(item)
+
+    def finish_calculation(self, total):
+        self.is_calculating = False
+        self.calc_btn.text = "НАЧАТЬ РАСЧЕТ"
+        self.stop_btn.disabled = True
+        self.results_header.text = "Завершено"
+        self.summary_label.text = f"Всего найдено простых чисел: {total}"
+        self.show_notification("Расчет завершен")
+
+    def distribute_range(self, total_start, total_end, workers):
+        total = total_end - total_start + 1
+        chunk = total // workers
+        return [(total_start + i * chunk, total_start + (i + 1) * chunk - 1 if i < workers - 1 else total_end) for i in range(workers)]
+
+    def show_settings(self):
+        box = BoxLayout(orientation="vertical", spacing=15, size_hint_y=None, height=200)
+        theme_switch = MDSwitch(active=self.theme_cls.theme_style == "Dark")
+        theme_switch.bind(active=lambda *x: self.toggle_theme())
+        box.add_widget(MDLabel(text="Тема:", halign="center"))
+        box.add_widget(theme_switch)
+        self.dialog = MDDialog(title="Настройки", type="custom", content_cls=box, buttons=[MDFlatButton(text="Закрыть", on_release=lambda x: self.dialog.dismiss())])
+        self.dialog.open()
+
+    def toggle_theme(self):
+        self.theme_cls.theme_style = "Dark" if self.theme_cls.theme_style == "Light" else "Light"
+
+    def show_help(self):
+        self.dialog = MDDialog(title="Справка", text="Введите диапазон, потоки и нажмите НАЧАТЬ РАСЧЕТ.", buttons=[MDFlatButton(text="Закрыть", on_release=lambda x: self.dialog.dismiss())])
+        self.dialog.open()
+
+    def show_error(self, message):
+        self.dialog = MDDialog(title="Ошибка", text=message, buttons=[MDRaisedButton(text="OK", on_release=lambda x: self.dialog.dismiss())])
+        self.dialog.open()
+
+    def show_notification(self, message):
+        snackbar = Snackbar()
+        snackbar.text = message
+        snackbar.open()
 
 if __name__ == "__main__":
-    main()
+    PrimeNumberApp().run()
