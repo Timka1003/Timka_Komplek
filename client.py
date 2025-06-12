@@ -8,13 +8,15 @@ from kivymd.uix.progressbar import MDProgressBar
 from kivymd.uix.dialog import MDDialog
 from kivymd.uix.list import TwoLineListItem
 from kivymd.uix.toolbar import MDTopAppBar
-from kivymd.uix.selectioncontrol import MDSwitch
+from kivymd.uix.selectioncontrol import MDCheckbox
 from kivymd.uix.snackbar import Snackbar
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.scrollview import ScrollView
 from kivy.clock import Clock
 import socket
 from threading import Thread
+import random
+import math
 
 class PrimeNumberApp(MDApp):
     def __init__(self, **kwargs):
@@ -22,6 +24,8 @@ class PrimeNumberApp(MDApp):
         self.dialog = None
         self.calculation_thread = None
         self.is_calculating = False
+        self.use_fast_method = True  
+        self.server_mode = False     
 
     def build(self):
         self.theme_cls.theme_style = "Light"
@@ -180,10 +184,75 @@ class PrimeNumberApp(MDApp):
         for i, (r_start, r_end) in enumerate(ranges):
             if not self.is_calculating:
                 return
-            count = self.real_server_request(r_start, r_end)
+            
+            if self.server_mode:
+                count = self.real_server_request(r_start, r_end)
+            else:
+                count = self.local_calculation(r_start, r_end)
+                
             total_primes += count
             Clock.schedule_once(lambda dt, s=r_start, e=r_end, c=count: self.update_results(s, e, c, total_primes, i+1, len(ranges)))
         Clock.schedule_once(lambda dt: self.finish_calculation(total_primes))
+
+    def local_calculation(self, start, end):
+        count = 0
+        for num in range(start, end + 1):
+            if not self.is_calculating:
+                return 0
+                
+            if self.use_fast_method:
+                if self.is_prime_miller_rabin(num):
+                    count += 1
+            else:
+                if self.is_prime_trial_division(num):
+                    count += 1
+        return count
+
+    def is_prime_trial_division(self, n):
+        """Метод пробного деления (точный, но медленный для больших чисел)"""
+        if n <= 1:
+            return False
+        if n <= 3:
+            return True
+        if n % 2 == 0 or n % 3 == 0:
+            return False
+        i = 5
+        w = 2
+        while i * i <= n:
+            if n % i == 0:
+                return False
+            i += w
+            w = 6 - w
+        return True
+
+    def is_prime_miller_rabin(self, n, k=5):
+        """Тест Миллера-Рабина (вероятностный, но быстрый и точен для k=5)"""
+        if n <= 1:
+            return False
+        elif n <= 3:
+            return True
+        elif n % 2 == 0:
+            return False
+            
+        # Записываем n-1 как d*2^s
+        d = n - 1
+        s = 0
+        while d % 2 == 0:
+            d //= 2
+            s += 1
+
+        for _ in range(k):
+            a = random.randint(2, n - 2)
+            x = pow(a, d, n)
+            if x == 1 or x == n - 1:
+                continue
+            for __ in range(s - 1):
+                x = pow(x, 2, n)
+                if x == n - 1:
+                    break
+            else:
+                return False
+        return True
 
     def real_server_request(self, start, end):
         try:
@@ -216,28 +285,76 @@ class PrimeNumberApp(MDApp):
 
     def show_settings(self):
         box = BoxLayout(orientation="vertical", spacing=15, size_hint_y=None, height=200)
-        theme_switch = MDSwitch(active=self.theme_cls.theme_style == "Dark")
-        theme_switch.bind(active=lambda *x: self.toggle_theme())
-        box.add_widget(MDLabel(text="Тема:", halign="center"))
-        box.add_widget(theme_switch)
-        self.dialog = MDDialog(title="Настройки", type="custom", content_cls=box, buttons=[MDFlatButton(text="Закрыть", on_release=lambda x: self.dialog.dismiss())])
+        
+        theme_box = BoxLayout(orientation="horizontal", size_hint_y=None, height=50)
+        theme_label = MDLabel(text="Темная тема:", halign="left", size_hint_x=0.7)
+        self.theme_check = MDCheckbox(active=self.theme_cls.theme_style == "Dark", size_hint_x=0.3)
+        self.theme_check.bind(active=lambda instance, value: self.toggle_theme())
+        theme_box.add_widget(theme_label)
+        theme_box.add_widget(self.theme_check)
+        
+        method_box = BoxLayout(orientation="horizontal", size_hint_y=None, height=50)
+        method_label = MDLabel(text="Быстрый метод:", halign="left", size_hint_x=0.7)
+        self.method_check = MDCheckbox(active=self.use_fast_method, size_hint_x=0.3)
+        self.method_check.bind(active=lambda instance, value: setattr(self, 'use_fast_method', value))
+        method_box.add_widget(method_label)
+        method_box.add_widget(self.method_check)
+
+        server_box = BoxLayout(orientation="horizontal", size_hint_y=None, height=50)
+        server_label = MDLabel(text="Режим сервера:", halign="left", size_hint_x=0.7)
+        self.server_check = MDCheckbox(active=self.server_mode, size_hint_x=0.3)
+        self.server_check.bind(active=lambda instance, value: setattr(self, 'server_mode', value))
+        server_box.add_widget(server_label)
+        server_box.add_widget(self.server_check)
+        
+        box.add_widget(theme_box)
+        box.add_widget(method_box)
+        box.add_widget(server_box)
+        
+        self.dialog = MDDialog(
+            title="Настройки", 
+            type="custom", 
+            content_cls=box, 
+            buttons=[MDFlatButton(text="Закрыть", on_release=lambda x: self.dialog.dismiss())]
+        )
         self.dialog.open()
 
     def toggle_theme(self):
         self.theme_cls.theme_style = "Dark" if self.theme_cls.theme_style == "Light" else "Light"
+        if hasattr(self, 'theme_check'):
+            self.theme_check.active = self.theme_cls.theme_style == "Dark"
 
     def show_help(self):
-        self.dialog = MDDialog(title="Справка", text="Введите диапазон, потоки и нажмите НАЧАТЬ РАСЧЕТ.", buttons=[MDFlatButton(text="Закрыть", on_release=lambda x: self.dialog.dismiss())])
+        help_text = """Введите диапазон, количество потоков и нажмите НАЧАТЬ РАСЧЕТ.
+
+Доступные методы проверки:
+1. Метод пробного деления (точный, но медленный)
+2. Тест Миллера-Рабина (вероятностный, но быстрый)
+
+Режимы работы:
+- Локальный расчет (по умолчанию)
+- Серверный расчет (требует запущенного сервера)
+
+Настройки можно изменить в меню."""
+        self.dialog = MDDialog(
+            title="Справка", 
+            text=help_text, 
+            buttons=[MDFlatButton(text="Закрыть", on_release=lambda x: self.dialog.dismiss())]
+        )
         self.dialog.open()
 
     def show_error(self, message):
-        self.dialog = MDDialog(title="Ошибка", text=message, buttons=[MDRaisedButton(text="OK", on_release=lambda x: self.dialog.dismiss())])
+        self.dialog = MDDialog(
+            title="Ошибка", 
+            text=message, 
+            buttons=[MDRaisedButton(text="OK", on_release=lambda x: self.dialog.dismiss())]
+        )
         self.dialog.open()
 
     def show_notification(self, message):
         snackbar = Snackbar()
         snackbar.text = message
         snackbar.open()
-
+           
 if __name__ == "__main__":
     PrimeNumberApp().run()
