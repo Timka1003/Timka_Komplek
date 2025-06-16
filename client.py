@@ -1,4 +1,3 @@
-
 from kivymd.app import MDApp
 from kivymd.uix.screen import MDScreen
 from kivymd.uix.card import MDCard
@@ -7,20 +6,22 @@ from kivymd.uix.textfield import MDTextField
 from kivymd.uix.label import MDLabel
 from kivymd.uix.progressbar import MDProgressBar
 from kivymd.uix.dialog import MDDialog
-from kivymd.uix.list import TwoLineListItem
+from kivymd.uix.list import TwoLineListItem, ThreeLineListItem
 from kivymd.uix.toolbar import MDTopAppBar
 from kivymd.uix.selectioncontrol import MDCheckbox
 from kivymd.uix.snackbar import Snackbar
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.scrollview import ScrollView
 from kivy.clock import Clock
-from kivymd.uix.snackbar import Snackbar
-from kivymd.uix.label import MDLabel
 import socket
-from threading import Thread
+from threading import Thread, Lock
 import random
 import math
 from functools import partial
+import subprocess
+import time
+import os
+from datetime import datetime
 
 class PrimeNumberApp(MDApp):
     def __init__(self, **kwargs):
@@ -29,11 +30,18 @@ class PrimeNumberApp(MDApp):
         self.calculation_thread = None
         self.is_calculating = False
         self.use_fast_method = True
-        self.server_mode = False
-        self.max_number = 10**100  # Максимальное поддерживаемое число
+        self.server_mode = True
+        self.max_number = 10**100
         self.server_address = "localhost"
         self.server_port = 5555
         self.current_calculation_id = 0
+        self.servers = {}
+        self.next_port = 5555
+        self.server_status = {}
+        self.server_lock = Lock()
+        self.server_stats = {}
+        self.cache = {}
+
 
     def build(self):
         self.theme_cls.theme_style = "Light"
@@ -41,35 +49,30 @@ class PrimeNumberApp(MDApp):
         self.theme_cls.accent_palette = "Blue"
         
         self.screen = MDScreen()
-
         root_layout = BoxLayout(orientation="vertical")
 
         # Top App Bar
         self.top_bar = MDTopAppBar(
-            title="Поиск простых чисел [v2.0]",
+            title="Поиск простых чисел [v2.1]",
             left_action_items=[["cog", lambda x: self.show_settings()]],
-            right_action_items=[["help-circle", lambda x: self.show_help()], 
-                              ["server-network", lambda x: self.show_server_settings()]],
+            right_action_items=[
+                ["help-circle", lambda x: self.show_help()], 
+                ["server-network", lambda x: self.show_server_settings()],
+                ["server", lambda x: self.show_server_management()]
+            ],
             elevation=4
         )
         root_layout.add_widget(self.top_bar)
 
         # Main Content
         content_layout = BoxLayout(orientation="horizontal", padding=10, spacing=10)
-
-        # Settings Card
         self.settings_card = self.build_settings_card()
-        
-        # Results Card
         self.results_card = self.build_results_card()
-
         content_layout.add_widget(self.settings_card)
         content_layout.add_widget(self.results_card)
-
         root_layout.add_widget(content_layout)
         self.screen.add_widget(root_layout)
         
-        # Initialize status label
         self.status_label = MDLabel(
             text="Готов к работе", 
             halign="center",
@@ -80,6 +83,8 @@ class PrimeNumberApp(MDApp):
         root_layout.add_widget(self.status_label)
         
         return self.screen
+
+
 
     def build_settings_card(self):
         card = MDCard(
@@ -147,8 +152,6 @@ class PrimeNumberApp(MDApp):
 
         return card
 
-
-
     def build_results_card(self):
         card = MDCard(
             orientation="vertical", 
@@ -201,228 +204,6 @@ class PrimeNumberApp(MDApp):
 
         return card
 
-    def toggle_calculation(self, *args):
-        if self.is_calculating:
-            self.stop_calculation()
-        else:
-            self.start_calculation()
-
-    def start_calculation(self):
-        try:
-            start = int(self.start_input.text)
-            end = int(self.end_input.text)
-            workers = int(self.workers_input.text)
-            batch_size = int(self.batch_input.text)
-
-            # Валидация ввода
-            error = self.validate_input(start, end, workers, batch_size)
-            if error:
-                self.show_error(error)
-                return
-
-            self.current_calculation_id += 1  # Уникальный ID для текущего расчета
-            self.prepare_for_calculation()
-            
-            # Запуск расчета в отдельном потоке
-            self.calculation_thread = Thread(
-                target=self.run_calculation,
-                args=(start, end, workers, batch_size, self.current_calculation_id),
-                daemon=True
-            )
-            self.calculation_thread.start()
-            
-            self.update_status(f"Расчет запущен (ID: {self.current_calculation_id})")
-        except ValueError:
-            self.show_error("Неверный формат чисел")
-
-    def validate_input(self, start, end, workers, batch_size):
-        if start < 1:
-            return "Начало диапазона должно быть ≥ 1"
-        if end < start:
-            return "Конец диапазона должен быть ≥ начала"
-        if workers < 1 or workers > 32:
-            return "Количество потоков должно быть от 1 до 32"
-        if batch_size < 1 or batch_size > 100000:
-            return "Размер пакета должен быть от 1 до 100000"
-        if end > self.max_number:
-            return f"Максимальное поддерживаемое число: 10^{int(math.log10(self.max_number))}"
-        return None
-
-    def prepare_for_calculation(self):
-        self.is_calculating = True
-        self.results_list.clear_widgets()
-        self.calc_btn.text = "ПАУЗА"
-        self.stop_btn.disabled = False
-        self.progress.value = 0
-        self.results_header.text = "Выполняется..."
-        self.summary_label.text = ""
-        self.stats_label.text = ""
-
-    def run_calculation(self, start, end, workers, batch_size, calculation_id):
-        total_primes = 0
-        total_numbers = end - start + 1
-        ranges = self.distribute_range(start, end, workers)
-        
-        for i, (r_start, r_end) in enumerate(ranges):
-            if not self.is_calculating or calculation_id != self.current_calculation_id:
-                return
-                
-            if self.server_mode:
-                count = self.server_request(r_start, r_end, batch_size)
-            else:
-                count = self.local_calculation(r_start, r_end, batch_size)
-                
-            total_primes += count
-            
-            # Обновление UI через главный поток
-            Clock.schedule_once(partial(
-                self.update_results,
-                r_start, r_end, count, total_primes,
-                i+1, len(ranges), total_numbers
-            ))
-        
-        Clock.schedule_once(partial(self.finish_calculation, total_primes))
-
-    def local_calculation(self, start, end, batch_size):
-        count = 0
-        current = start
-        
-        while current <= end and self.is_calculating:
-            batch_end = min(current + batch_size - 1, end)
-            
-            # Оптимизация: пропускаем четные числа кроме 2
-            if current <= 2 and batch_end >= 2:
-                count += 1
-            
-            start_num = current if current % 2 != 0 else current + 1
-            if start_num <= batch_end:
-                for num in range(start_num, batch_end + 1, 2):
-                    if self.use_fast_method:
-                        if self.is_prime_miller_rabin(num):
-                            count += 1
-                    else:
-                        if self.is_prime_trial_division(num):
-                            count += 1
-            
-            current = batch_end + 1
-        
-        return count
-
-    def is_prime_trial_division(self, n):
-        """Оптимизированный метод пробного деления"""
-        if n <= 1:
-            return False
-        if n <= 3:
-            return True
-        if n % 2 == 0 or n % 3 == 0:
-            return False
-        i = 5
-        w = 2
-        while i * i <= n:
-            if n % i == 0:
-                return False
-            i += w
-            w = 6 - w
-        return True
-
-    def is_prime_miller_rabin(self, n, k=5):
-        """Улучшенный тест Миллера-Рабина"""
-        if n <= 1:
-            return False
-        elif n <= 3:
-            return True
-        elif n % 2 == 0:
-            return False
-            
-        # Записываем n-1 как d*2^s
-        d = n - 1
-        s = 0
-        while d % 2 == 0:
-            d //= 2
-            s += 1
-
-        for _ in range(k):
-            a = random.randint(2, n - 2)
-            x = pow(a, d, n)
-            if x == 1 or x == n - 1:
-                continue
-            for __ in range(s - 1):
-                x = pow(x, 2, n)
-                if x == n - 1:
-                    break
-            else:
-                return False
-        return True
-
-    def server_request(self, start, end, batch_size):
-        try:
-            with socket.create_connection(
-                (self.server_address, self.server_port), 
-                timeout=300  # Увеличенный таймаут для больших диапазонов
-            ) as sock:
-                sock.sendall(f"{start},{end},{batch_size}".encode())
-                response = sock.recv(1024).decode()
-                if response.isdigit():
-                    return int(response)
-                return 0
-        except Exception as e:
-            Clock.schedule_once(lambda dt: self.show_error(f"Ошибка сервера: {str(e)[:100]}"))
-            return 0
-        
-    def update_results(self, start, end, count, total, current, total_workers, total_numbers, *args):
-        if not self.is_calculating:
-            return
-            
-        progress = (current / total_workers) * 100
-        self.progress.value = progress
-        
-        item = TwoLineListItem(
-            text=f"Диапазон {start}-{end}",
-            secondary_text=f"Простых чисел: {count}",
-            theme_text_color="Primary",
-            secondary_theme_text_color="Secondary"
-        )
-        self.results_list.add_widget(item)
-        
-        self.summary_label.text = f"Всего найдено: {total}"
-        
-        processed = min(end, int(self.end_input.text)) - int(self.start_input.text) + 1
-        percent = (processed / total_numbers) * 100
-        self.stats_label.text = f"Обработано: {processed:,} из {total_numbers:,} ({percent:.1f}%)"
-        
-        self.scroll_results.scroll_to(item)
-
-    def finish_calculation(self, total_primes, *args):
-        if not self.is_calculating:
-            return
-            
-        self.is_calculating = False
-        self.calc_btn.text = "НАЧАТЬ РАСЧЕТ"
-        self.stop_btn.disabled = True
-        self.results_header.text = "Завершено"
-        self.summary_label.text = f"Всего найдено простых чисел: {total_primes}"
-        self.progress.value = 100
-        self.update_status("Готов к работе")
-        self.show_notification("Расчет завершен")
-
-    def stop_calculation(self, *args):
-        self.is_calculating = False
-        self.calc_btn.text = "НАЧАТЬ РАСЧЕТ"
-        self.stop_btn.disabled = True
-        self.results_header.text = "Расчет прерван"
-        self.update_status("Расчет остановлен")
-
-    def distribute_range(self, total_start, total_end, workers):
-        total = total_end - total_start + 1
-        chunk = total // workers
-        return [
-            (
-                total_start + i * chunk,
-                total_start + (i + 1) * chunk - 1 if i < workers - 1 else total_end
-            ) 
-            for i in range(workers)
-        ]
-
     def show_settings(self):
         content = BoxLayout(orientation="vertical", spacing=15, size_hint_y=None, height=200)
         
@@ -464,20 +245,151 @@ class PrimeNumberApp(MDApp):
         )
         self.dialog.open()
 
+    def toggle_theme(self):
+        self.theme_cls.theme_style = "Dark" if self.theme_cls.theme_style == "Light" else "Light"
+        if hasattr(self, 'theme_check'):
+            self.theme_check.active = self.theme_cls.theme_style == "Dark"
+
+    def show_server_management(self):
+        """Диалог управления серверами"""
+        content = BoxLayout(orientation="vertical", spacing=15, size_hint_y=None, height=250)
+        
+        # Количество серверов
+        self.server_count_input = MDTextField(
+            hint_text="Количество серверов",
+            text="1",
+            input_filter="int",
+            size_hint_y=None,
+            height=60
+        )
+        
+        # Базовый порт
+        self.base_port_input = MDTextField(
+            hint_text="Базовый порт",
+            text="5555",
+            input_filter="int",
+            size_hint_y=None,
+            height=60
+        )
+        
+        # Количество потоков на сервер
+        self.server_workers_input = MDTextField(
+            hint_text="Потоков на сервер",
+            text="4",
+            input_filter="int",
+            size_hint_y=None,
+            height=60
+        )
+        
+        content.add_widget(self.server_count_input)
+        content.add_widget(self.base_port_input)
+        content.add_widget(self.server_workers_input)
+        
+        self.dialog = MDDialog(
+            title="Управление серверами",
+            type="custom",
+            content_cls=content,
+            buttons=[
+                MDFlatButton(text="Отмена", on_release=lambda x: self.dialog.dismiss()),
+                MDRaisedButton(text="Запустить", on_release=self.start_servers),
+                MDRaisedButton(text="Остановить все", on_release=self.stop_all_servers)
+            ]
+        )
+        self.dialog.open()
+
+    def start_servers(self, *args):
+        """Запуск указанного количества серверов"""
+        try:
+            server_count = int(self.server_count_input.text)
+            base_port = int(self.base_port_input.text)
+            workers = int(self.server_workers_input.text)
+            
+            if server_count < 1 or server_count > 10:
+                self.show_error("Количество серверов должно быть от 1 до 10")
+                return
+                
+            if base_port < 1024 or base_port > 65535:
+                self.show_error("Порт должен быть в диапазоне 1024-65535")
+                return
+                
+            if workers < 1 or workers > 20:
+                self.show_error("Количество потоков должно быть от 1 до 20")
+                return
+            
+            # Останавливаем все текущие серверы
+            self.stop_all_servers()
+            
+            # Запускаем новые серверы
+            for i in range(server_count):
+                port = base_port + i
+                self.start_server_instance(port, workers)
+                
+            self.dialog.dismiss()
+            self.show_notification(f"Запущено {server_count} серверов")
+            
+        except ValueError:
+            self.show_error("Неверный формат чисел")
+
+    def start_server_instance(self, port, workers):
+        """Запуск одного экземпляра сервера как подпроцесса"""
+        try:
+            # Получаем путь к текущему скрипту
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            server_script = os.path.join(script_dir, "server.py")
+            
+            # Запускаем сервер как подпроцесс
+            process = subprocess.Popen(
+                ["python", server_script, "--port", str(port), "--workers", str(workers)],
+                creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0
+            )
+            
+            # Сохраняем информацию о сервере
+            self.servers[port] = {
+                "process": process,
+                "workers": workers,
+                "start_time": time.time()
+            }
+            
+            # Обновляем статус
+            self.update_status(f"Сервер на порту {port} запущен")
+            
+        except Exception as e:
+            self.show_error(f"Ошибка запуска сервера: {str(e)}")
+
+    def stop_all_servers(self, *args):
+        """Остановка всех запущенных серверов"""
+        for port, server_info in list(self.servers.items()):
+            try:
+                server_info["process"].terminate()
+                server_info["process"].wait(timeout=3)
+                self.update_status(f"Сервер на порту {port} остановлен")
+            except:
+                try:
+                    server_info["process"].kill()
+                except:
+                    pass
+            finally:
+                self.servers.pop(port, None)
+        
+        if self.dialog:
+            self.dialog.dismiss()
+        self.show_notification("Все серверы остановлены")
+
     def show_server_settings(self):
+        """Настройки подключения к серверам (для клиентского режима)"""
         content = BoxLayout(orientation="vertical", spacing=15, size_hint_y=None, height=150)
         
         # Адрес сервера
         self.server_addr_input = MDTextField(
-            hint_text="Адрес сервера",
+            hint_text="Адрес сервера (через запятую для нескольких)",
             text=self.server_address,
             size_hint_y=None,
             height=60
         )
         
-        # Порт сервера
+        # Базовый порт
         self.server_port_input = MDTextField(
-            hint_text="Порт сервера",
+            hint_text="Базовый порт",
             text=str(self.server_port),
             input_filter="int",
             size_hint_y=None,
@@ -488,7 +400,7 @@ class PrimeNumberApp(MDApp):
         content.add_widget(self.server_port_input)
         
         self.dialog = MDDialog(
-            title="Настройки сервера",
+            title="Настройки серверов",
             type="custom",
             content_cls=content,
             buttons=[
@@ -499,31 +411,210 @@ class PrimeNumberApp(MDApp):
         self.dialog.open()
 
     def save_server_settings(self, *args):
+        """Сохранение настроек подключения к серверам"""
         try:
             self.server_address = self.server_addr_input.text
             self.server_port = int(self.server_port_input.text)
             self.dialog.dismiss()
-            self.show_notification("Настройки сервера сохранены")
+            self.show_notification("Настройки серверов сохранены")
         except ValueError:
             self.show_error("Неверный формат порта")
 
+    def run_calculation(self, start, end, workers, batch_size, calculation_id):
+        """Основной метод выполнения расчета через серверы"""
+        total_primes = 0
+        total_numbers = end - start + 1
+        addresses = self.server_address.split(',')
+        ports = [self.server_port + i for i in range(len(addresses))]
+        
+        if not addresses:
+            Clock.schedule_once(lambda dt: self.show_error("Нет доступных серверов"))
+            return
+
+        ranges = self.distribute_range(start, end, len(addresses))
+        
+        for i, (r_start, r_end) in enumerate(ranges):
+            if not self.is_calculating or calculation_id != self.current_calculation_id:
+                return
+                
+            if i >= len(addresses):
+                break
+                
+            try:
+                with socket.create_connection(
+                    (addresses[i].strip(), ports[i]), 
+                    timeout=300
+                ) as sock:
+                    sock.sendall(f"{r_start},{r_end},{batch_size}".encode())
+                    response = sock.recv(1024).decode()
+                    
+                    if response.isdigit():
+                        count = int(response)
+                        total_primes += count
+                        
+                        Clock.schedule_once(partial(
+                            self.update_results,
+                            r_start, r_end, count, total_primes,
+                            i+1, len(ranges), total_numbers
+                        ))
+                    else:
+                        Clock.schedule_once(lambda dt, addr=addresses[i], port=ports[i]: 
+                            self.show_error(f"Некорректный ответ от сервера {addr}:{port}"))
+            except Exception as e:
+                error_msg = str(e)[:100]
+                Clock.schedule_once(lambda dt, msg=error_msg: self.show_error(f"Ошибка сервера: {msg}"))
+        
+        Clock.schedule_once(partial(self.finish_calculation, total_primes))
+
+    def distribute_range(self, total_start, total_end, workers):
+        """Распределение диапазона между серверами"""
+        total = total_end - total_start + 1
+        chunk = total // workers
+        return [
+            (
+                total_start + i * chunk,
+                total_start + (i + 1) * chunk - 1 if i < workers - 1 else total_end
+            ) 
+            for i in range(workers)
+        ]
+
+    def server_request(self, start, end, batch_size):
+        """Отправка запроса на сервер"""
+        try:
+            with socket.create_connection(
+                (self.server_address.strip(), self.server_port), 
+                timeout=300
+            ) as sock:
+                sock.sendall(f"{start},{end},{batch_size}".encode())
+                response = sock.recv(1024).decode()
+                if response.isdigit():
+                    return int(response)
+                return 0
+        except Exception as e:
+            Clock.schedule_once(lambda dt: self.show_error(f"Ошибка сервера: {str(e)[:100]}"))
+            return 0
+
+    def update_results(self, start, end, count, total, current, total_workers, total_numbers, *args):
+        """Обновление результатов в UI"""
+        if not self.is_calculating:
+            return
+            
+        progress = (current / total_workers) * 100
+        self.progress.value = progress
+        
+        item = TwoLineListItem(
+            text=f"Диапазон {start}-{end}",
+            secondary_text=f"Простых чисел: {count}",
+            theme_text_color="Primary",
+            secondary_theme_text_color="Secondary"
+        )
+        self.results_list.add_widget(item)
+        
+        self.summary_label.text = f"Всего найдено: {total}"
+        
+        processed = min(end, int(self.end_input.text)) - int(self.start_input.text) + 1
+        percent = (processed / total_numbers) * 100
+        self.stats_label.text = f"Обработано: {processed:,} из {total_numbers:,} ({percent:.1f}%)"
+        
+        self.scroll_results.scroll_to(item)
+
+    def finish_calculation(self, total_primes, *args):
+        """Завершение расчета"""
+        if not self.is_calculating:
+            return
+            
+        self.is_calculating = False
+        self.calc_btn.text = "НАЧАТЬ РАСЧЕТ"
+        self.stop_btn.disabled = True
+        self.results_header.text = "Завершено"
+        self.summary_label.text = f"Всего найдено простых чисел: {total_primes}"
+        self.progress.value = 100
+        self.update_status("Готов к работе")
+        self.show_notification("Расчет завершен")
+
+    def toggle_calculation(self, *args):
+        """Переключение между началом и остановкой расчета"""
+        if self.is_calculating:
+            self.stop_calculation()
+        else:
+            self.start_calculation()
+
+    def start_calculation(self):
+        """Запуск расчета"""
+        try:
+            start = int(self.start_input.text)
+            end = int(self.end_input.text)
+            workers = int(self.workers_input.text)
+            batch_size = int(self.batch_input.text)
+
+            # Валидация ввода
+            error = self.validate_input(start, end, workers, batch_size)
+            if error:
+                self.show_error(error)
+                return
+
+            self.current_calculation_id += 1
+            self.prepare_for_calculation()
+            
+            # Запуск расчета в отдельном потоке
+            self.calculation_thread = Thread(
+                target=self.run_calculation,
+                args=(start, end, workers, batch_size, self.current_calculation_id),
+                daemon=True
+            )
+            self.calculation_thread.start()
+            
+            self.update_status(f"Расчет запущен (ID: {self.current_calculation_id})")
+        except ValueError:
+            self.show_error("Неверный формат чисел")
+
+    def validate_input(self, start, end, workers, batch_size):
+        """Проверка корректности введенных значений"""
+        if start < 1:
+            return "Начало диапазона должно быть ≥ 1"
+        if end < start:
+            return "Конец диапазона должен быть ≥ начала"
+        if workers < 1 or workers > 32:
+            return "Количество потоков должно быть от 1 до 32"
+        if batch_size < 1 or batch_size > 100000:
+            return "Размер пакета должен быть от 1 до 100000"
+        if end > self.max_number:
+            return f"Максимальное поддерживаемое число: 10^{int(math.log10(self.max_number))}"
+        return None
+
+    def prepare_for_calculation(self):
+        """Подготовка интерфейса к расчету"""
+        self.is_calculating = True
+        self.results_list.clear_widgets()
+        self.calc_btn.text = "ПАУЗА"
+        self.stop_btn.disabled = False
+        self.progress.value = 0
+        self.results_header.text = "Выполняется..."
+        self.summary_label.text = ""
+        self.stats_label.text = ""
+
+    def stop_calculation(self, *args):
+        """Остановка расчета"""
+        self.is_calculating = False
+        self.calc_btn.text = "НАЧАТЬ РАСЧЕТ"
+        self.stop_btn.disabled = True
+        self.results_header.text = "Расчет прерван"
+        self.update_status("Расчет остановлен")
+
     def show_help(self):
+        """Показ справки"""
         help_text = """Поиск простых чисел в заданном диапазоне
 
 Параметры:
 - Начало/конец диапазона: границы поиска
-- Потоки: количество параллельных процессов
+- Потоки: количество серверов
 - Размер пакета: чисел за одну итерацию
 
-Методы проверки:
-1. Быстрый (Миллер-Рабин) - вероятностный метод
-2. Точный (пробное деление) - медленнее, но точный
-
 Режимы работы:
-- Локальный: вычисления на этом устройстве
-- Серверный: отправка запросов на сервер
+- Серверный: вычисления на удаленных серверах
+- Можно запускать несколько серверов
 
-Версия 2.0 | Поддержка чисел до 10^100"""
+Версия 2.1 | Поддержка чисел до 10^100"""
         
         self.dialog = MDDialog(
             title="Справка",
@@ -534,12 +625,8 @@ class PrimeNumberApp(MDApp):
         )
         self.dialog.open()
 
-    def toggle_theme(self):
-        self.theme_cls.theme_style = "Dark" if self.theme_cls.theme_style == "Light" else "Light"
-        if hasattr(self, 'theme_check'):
-            self.theme_check.active = self.theme_cls.theme_style == "Dark"
-
     def show_error(self, message):
+        """Показ ошибки"""
         self.dialog = MDDialog(
             title="Ошибка",
             text=message,
@@ -550,6 +637,7 @@ class PrimeNumberApp(MDApp):
         self.dialog.open()
 
     def show_notification(self, message):
+        """Показ уведомления"""
         Snackbar(
             MDLabel(text=message),
             duration=2,
@@ -559,6 +647,7 @@ class PrimeNumberApp(MDApp):
         ).open()
 
     def update_status(self, message):
+        """Обновление статуса"""
         self.status_label.text = message
 
 if __name__ == "__main__":
