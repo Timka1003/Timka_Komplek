@@ -22,6 +22,9 @@ import subprocess
 import time
 import os
 from datetime import datetime
+from kivy.metrics import dp
+
+
 
 class PrimeNumberApp(MDApp):
     def __init__(self, **kwargs):
@@ -41,6 +44,7 @@ class PrimeNumberApp(MDApp):
         self.server_lock = Lock()
         self.server_stats = {}
         self.cache = {}
+
 
 
     def build(self):
@@ -192,17 +196,45 @@ class PrimeNumberApp(MDApp):
         )
         card.add_widget(self.summary_label)
 
-        # Stats Label
-        self.stats_label = MDLabel(
-            text="", 
-            halign="center", 
-            theme_text_color="Secondary",
-            size_hint_y=None, 
-            height=30
-        )
-        card.add_widget(self.stats_label)
-
         return card
+
+    
+    def update_server_status(self, server_id, port, start, end, current, primes_found):
+        """Обновляет статус сервера с правильным форматированием"""
+        # Форматирование чисел с разделителями тысяч
+        start_fmt = f"{start:,}".replace(",", " ")
+        end_fmt = f"{end:,}".replace(",", " ")
+        current_fmt = f"{current:,}".replace(",", " ")
+        
+        status_text = (
+            f"[Сервер {server_id}] порт {port}\n"
+            f"Диапазон: {start_fmt} – {end_fmt}\n"
+            f"Обработано: {current_fmt}\n"
+            f"Простых: {primes_found if primes_found is not None else 'расчет...'}"
+        )
+
+        # Ищем существующую метку или создаем новую
+        found = False
+        for child in self.server_status_container.children:
+            if hasattr(child, 'server_id') and child.server_id == server_id:
+                child.text = status_text
+                found = True
+                break
+
+        if not found:
+            label = MDLabel(
+                text=status_text,
+                halign="left",
+                theme_text_color="Primary",
+                size_hint_y=None,
+                height=dp(80),  # Фиксированная высота для 4 строк
+                padding=(dp(10), dp(5)),
+                font_style="Body1",  # Используем стандартный шрифт
+                line_height=1.0  # Стандартный межстрочный интервал
+            )
+            label.server_id = server_id
+            self.server_status_container.add_widget(label)
+
 
     def show_settings(self):
         content = BoxLayout(orientation="vertical", spacing=15, size_hint_y=None, height=200)
@@ -252,9 +284,21 @@ class PrimeNumberApp(MDApp):
 
     def show_server_management(self):
         """Диалог управления серверами"""
-        content = BoxLayout(orientation="vertical", spacing=15, size_hint_y=None, height=250)
+        self.check_servers_status()  # Проверяем статус перед показом
         
-        # Количество серверов
+        content = BoxLayout(orientation="vertical", spacing=15, size_hint_y=None, height=300)
+        
+        # Информация о текущих серверах
+        servers_info = MDLabel(
+            text="\n".join([f"Порт {port}: {info['workers']} потоков" 
+                        for port, info in self.servers.items()]) or "Нактивнычх серверов нет",
+            halign="center",
+            size_hint_y=None,
+            height=100
+        )
+        content.add_widget(servers_info)
+        
+        # Add this missing input field
         self.server_count_input = MDTextField(
             hint_text="Количество серверов",
             text="1",
@@ -333,28 +377,40 @@ class PrimeNumberApp(MDApp):
     def start_server_instance(self, port, workers):
         """Запуск одного экземпляра сервера как подпроцесса"""
         try:
-            # Получаем путь к текущему скрипту
             script_dir = os.path.dirname(os.path.abspath(__file__))
             server_script = os.path.join(script_dir, "server.py")
             
-            # Запускаем сервер как подпроцесс
             process = subprocess.Popen(
                 ["python", server_script, "--port", str(port), "--workers", str(workers)],
                 creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0
             )
             
-            # Сохраняем информацию о сервере
             self.servers[port] = {
                 "process": process,
                 "workers": workers,
-                "start_time": time.time()
+                "start_time": time.time(),
+                "address": "localhost" 
             }
             
-            # Обновляем статус
             self.update_status(f"Сервер на порту {port} запущен")
+            self.show_notification(f"Сервер на порту {port} запущен с {workers} потоками")
             
         except Exception as e:
             self.show_error(f"Ошибка запуска сервера: {str(e)}")
+            
+    def check_servers_status(self):
+        """Проверка статуса всех серверов"""
+        for port in list(self.servers.keys()):
+            try:
+                with socket.create_connection(("localhost", port), timeout=2) as sock:
+                    sock.sendall(b"status")
+                    response = sock.recv(1024).decode()
+                    self.server_stats[port] = eval(response)
+            except:
+                # Сервер не отвечает, удаляем его
+                self.servers.pop(port, None)
+                self.show_error(f"Сервер на порту {port} не отвечает и был удален")
+
 
     def stop_all_servers(self, *args):
         """Остановка всех запущенных серверов"""
@@ -421,50 +477,76 @@ class PrimeNumberApp(MDApp):
             self.show_error("Неверный формат порта")
 
     def run_calculation(self, start, end, workers, batch_size, calculation_id):
-        """Основной метод выполнения расчета через серверы"""
         total_primes = 0
         total_numbers = end - start + 1
-        addresses = self.server_address.split(',')
-        ports = [self.server_port + i for i in range(len(addresses))]
         
-        if not addresses:
+        active_servers = [(info["address"], port) for port, info in self.servers.items()]
+        if not active_servers:
             Clock.schedule_once(lambda dt: self.show_error("Нет доступных серверов"))
             return
 
-        ranges = self.distribute_range(start, end, len(addresses))
+        ranges = self.distribute_range(start, end, len(active_servers))
         
         for i, (r_start, r_end) in enumerate(ranges):
             if not self.is_calculating or calculation_id != self.current_calculation_id:
                 return
                 
-            if i >= len(addresses):
+            if i >= len(active_servers):
                 break
                 
+            address, port = active_servers[i]
             try:
-                with socket.create_connection(
-                    (addresses[i].strip(), ports[i]), 
-                    timeout=300
-                ) as sock:
+                with socket.create_connection((address, port), timeout=300) as sock:
                     sock.sendall(f"{r_start},{r_end},{batch_size}".encode())
-                    response = sock.recv(1024).decode()
                     
-                    if response.isdigit():
-                        count = int(response)
-                        total_primes += count
-                        
-                        Clock.schedule_once(partial(
-                            self.update_results,
-                            r_start, r_end, count, total_primes,
-                            i+1, len(ranges), total_numbers
-                        ))
-                    else:
-                        Clock.schedule_once(lambda dt, addr=addresses[i], port=ports[i]: 
-                            self.show_error(f"Некорректный ответ от сервера {addr}:{port}"))
+                    while True:
+                        try:
+                            response = sock.recv(1024).decode().strip()
+                        except:
+                            break
+
+                        if not response:
+                            break
+
+                        if response.startswith("STATUS:"):
+                            # Убрали обновление статуса
+                            continue
+
+                        if "END" in response:
+                            number_part = response.replace("END", "").strip()
+                            if number_part.isdigit():
+                                count = int(number_part)
+                                total_primes += count
+                                Clock.schedule_once(partial(
+                                    self.update_results,
+                                    r_start, r_end, count, total_primes,
+                                    i+1, len(ranges), total_numbers
+                                ))
+                            break
+
+                        elif response.strip().isdigit():
+                            count = int(response.strip())
+                            total_primes += count
+                            Clock.schedule_once(partial(
+                                self.update_results,
+                                r_start, r_end, count, total_primes,
+                                i+1, len(ranges), total_numbers
+                            ))
+                            continue
+
+                        else:
+                            print(f"[!] Неизвестный ответ от сервера: {response}")
+                            break
+
             except Exception as e:
                 error_msg = str(e)[:100]
-                Clock.schedule_once(lambda dt, msg=error_msg: self.show_error(f"Ошибка сервера: {msg}"))
-        
+                Clock.schedule_once(lambda dt, msg=error_msg: 
+                    self.show_error(f"Ошибка сервера {port}: {msg}"))
+                continue
+            
         Clock.schedule_once(partial(self.finish_calculation, total_primes))
+
+
 
     def distribute_range(self, total_start, total_end, workers):
         """Распределение диапазона между серверами"""
@@ -498,25 +580,28 @@ class PrimeNumberApp(MDApp):
         """Обновление результатов в UI"""
         if not self.is_calculating:
             return
-            
+
+        # Обновление прогресса (по количеству полученных результатов)
         progress = (current / total_workers) * 100
         self.progress.value = progress
-        
+
+        # Элемент списка результатов
         item = TwoLineListItem(
-            text=f"Диапазон {start}-{end}",
-            secondary_text=f"Простых чисел: {count}",
+            text=f"[{start:,} – {end:,}]",
+            secondary_text=f"Найдено простых: {count}",
             theme_text_color="Primary",
             secondary_theme_text_color="Secondary"
         )
         self.results_list.add_widget(item)
-        
-        self.summary_label.text = f"Всего найдено: {total}"
-        
-        processed = min(end, int(self.end_input.text)) - int(self.start_input.text) + 1
-        percent = (processed / total_numbers) * 100
-        self.stats_label.text = f"Обработано: {processed:,} из {total_numbers:,} ({percent:.1f}%)"
-        
-        self.scroll_results.scroll_to(item)
+
+        # Обновление сводки
+        self.summary_label.text = f"Всего найдено: {total:,}"
+
+        # Обновление статуса
+        self.status_label.text = f"Выполнено: {current} из {total_workers} участков"
+
+        # Скроллим вниз
+        Clock.schedule_once(lambda dt: self.scroll_results.scroll_to(item), 0.1)
 
     def finish_calculation(self, total_primes, *args):
         """Завершение расчета"""
@@ -591,7 +676,7 @@ class PrimeNumberApp(MDApp):
         self.progress.value = 0
         self.results_header.text = "Выполняется..."
         self.summary_label.text = ""
-        self.stats_label.text = ""
+        self.status_label.text = "" 
 
     def stop_calculation(self, *args):
         """Остановка расчета"""
